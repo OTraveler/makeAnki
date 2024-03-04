@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>解析 Markdown 文件并添加到 Anki</title>
+  </head>
+  <body>
+    <h1>解析 Markdown 文件并添加到 Anki</h1>
+    <label for="anki-api-input">Anki 接口地址：</label>
+    <input type="text" id="anki-api-input" style="width: 100%" value="http://localhost/anki"><br><br>
+    <label for="deck-name-input">牌组名称：</label>
+    <input type="text" id="deck-name-input" style="width: 100%" value="test"><br><br>
+    <label for="card-type-input">卡片类型：</label>
+    <input type="text" id="card-type-input" style="width: 100%" value="BasicMarkdown"><br><br>
+    <label for="card-type-input">Obsidian URI模板：</label>
+    <input type="text" id="obsidian-uri" style="width: 100%" value="obsidian://advanced-uri?vault=md&filepath=%25E6%2595%25B0%25E6%258D%25AE%25E5%25BA%2593%252F%25E3%2580%258ARedis%25E4%25BD%25BF%25E7%2594%25A8%25E6%2589%258B%25E5%2586%258C%25E3%2580%258B.md"><br><br>
+    <input type="file" id="file-input">
+    <button id="parse-button">开始解析添加</button>
+	<br />
+	<p>1、anki默认接口地址是 http://localhost:8765 ，这里是进行nginx转发后的地址（用nginx防止跨域问题）</p>
+	<p>2、如果是子级牌组，填写时从最顶级开始写，用::连接，如test牌组下有子牌组test1，那么应该这样写 test::test1</p>
+	<p>3、这里默认用能解析markdown的牌组，如果用其它牌组注意请求添加卡片接口传递的字段参数（在anki的笔记模板查看卡片有几个字段和字段名）</p>
+	<p>4、obsidian的uri用于在卡片跳转回obsidian查看详细内容，这里默认通过标题定位，还可以通过块链接定位，具体查看obsidian插件Advanced URI</p>
+	<p>5、因为AnkiConnect插件的原因，在通过http添加卡片时，有些请求需要很久才会回应，请观察下面添加结果，或者在控制台查看卡片添加情况</p>
+	<br />
+	<p>卡牌生成结果：</p>
+	<p id="makeResult">未开始</p>
+	
+	<br />
+	<hr />
+	<br />
+	
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script>
+      var ankiUrl;
+      var cardType;
+      var deckName;
+
+      // 读取 Markdown 文件的函数
+      async function readMarkdownFile(file) {
+        try {
+          const reader = new FileReader();
+          reader.readAsText(file);
+          return new Promise(resolve => {
+            reader.onload = () => resolve(reader.result);
+          });
+        } catch (error) {
+          console.error('读取文件失败:', error);
+          return null;
+        }
+      }
+
+      // 创建牌组的函数
+      async function createDeck(deckName) {
+        try {
+          const response = await axios.post(ankiUrl, {
+            action: 'createDeck',
+            version: 6,
+            params: {
+              deck: deckName
+            }
+          });
+
+          if (response.data.error) {
+            console.error('创建牌组失败:', response.data.error);
+          } else {
+            console.log('成功创建牌组:', deckName);
+          }
+        } catch (error) {
+          console.error('与 Anki 连接失败:', error);
+        }
+      }
+
+      // 将图片上传到 Anki 并返回文件名的函数
+      async function uploadImageToAnki(imageUrl) {
+        try {
+          const response = await axios.post(ankiUrl, {
+            action: 'storeMediaFile',
+            version: 6,
+            params: {
+              filename: imageUrl.split('/').pop(), // 使用图片链接中的文件名作为保存到本地的文件名
+              url: imageUrl
+            }
+          });
+
+          if (response.data.error) {
+            console.error('上传图片到 Anki 失败:', response.data.error);
+            return null;
+          } else {
+            console.log('成功上传图片到 Anki:', imageUrl);
+            return response.data.result;
+          }
+        } catch (error) {
+          console.error('与 Anki 连接失败:', error);
+          return null;
+        }
+      }
+
+      // 替换答案中的 Markdown 图片为 Anki 可解析的图片
+      async function replaceMarkdownImageWithAnkiImage(answer) {
+        const regex = /!\[(.*?)\]\((.*?)\)/g;
+        let match;
+        while ((match = regex.exec(answer)) !== null) {
+          const [markdownImage, altText, imageUrl] = match;
+          const ankiImage = await uploadImageToAnki(imageUrl);
+          if (ankiImage) {
+            answer = answer.replace(markdownImage, `<img src="${ankiImage}" alt="${altText}">`);
+          }
+        }
+        return answer;
+      }
+
+      // 将问题和答案插入到 Anki 的函数
+      async function insertIntoAnki(deckName, question, answer) {
+        try {
+          answer = await replaceMarkdownImageWithAnkiImage(answer); // 替换答案中的 Markdown 图片为 Anki 可解析的图片
+			
+		  // 获取obsidian的定位链接，将问题拼接到heading=后面
+		  var obsidianUri = document.getElementById('obsidian-uri').value;
+		  var exterLink = obsidianUri + '&heading=' + encodeURIComponent(question.replace("\r", ""));
+		  exterLink = '<div><a id="link" href="' + exterLink + '" style="font-size:70%;margin-left: 10px;margin-right: 10px;">' + 'Obs-' + question + '</a>';
+          const response = await axios.post(ankiUrl, {
+            action: 'addNote',
+            version: 6,
+            params: {
+              note: {
+                deckName: deckName,
+                modelName: cardType,
+                fields: {
+                  Front: question,
+                  Back: answer,
+				  ExterLink: exterLink
+                },
+                options: {
+                  allowDuplicate: false
+                }
+              }
+            }
+          });
+
+          if (response.data.error) {
+            console.error('插入到 Anki 失败:', response.data.error);
+          } else {
+            console.log('成功插入到 Anki:', question);
+          }
+        } catch (error) {
+          console.error('与 Anki 连接失败:', error);
+        }
+      }
+	  
+	  // 刷新卡牌生成结果
+	  function refreshMakeResult(result) {
+		var resultStr = document.getElementById("makeResult");
+		resultStr.innerHTML = result;
+	  }
+
+      // 主程序
+      async function main() {
+
+        const fileInput = document.getElementById('file-input');
+        const parseButton = document.getElementById('parse-button');
+
+        parseButton.addEventListener('click', async () => {
+          const file = fileInput.files[0];
+          if (!file) {
+			alert('请选择文件');
+            console.error('请选择文件');
+            return;
+          }
+
+          // 获取表单配置的参数
+          ankiUrl = document.getElementById('anki-api-input').value;
+          cardType = document.getElementById('card-type-input').value;
+          deckName = document.getElementById('deck-name-input').value;
+
+          // 读取 Markdown 文件
+          const content = await readMarkdownFile(file);
+          if (!content) {
+			alert('Markdown 文件无内容');
+            return;
+          }
+		  
+		  refreshMakeResult("准备提取问题并插入Anki");
+
+          // 按一级标题切割内容
+          const sections = content.split('\n# ');
+
+          // 提取问题和答案并插入到 Anki
+          for (let i = 1; i < sections.length; i++) {
+            const section = sections[i];
+            const [question, ...answerLines] = section.split('\n');
+            const answer = answerLines.join('\n');
+
+            // 在答案不为空的情况才添加
+            if (answer.length > 1) {
+              // 创建牌组（如果不存在）
+              await createDeck(deckName);
+              // 插入到 Anki
+              await insertIntoAnki(deckName, question, answer);
+			  // 刷新当前卡牌插入进度
+			  refreshMakeResult("当前插入卡片: " + question);
+            }
+          }
+		  // 刷新卡片插入完成结果
+		  refreshMakeResult("卡片生成完成！");
+        });
+      }
+
+      main();
+    </script>
+  </body>
+</html>
